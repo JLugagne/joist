@@ -36,3 +36,18 @@ func (f *FileSystem) WriteFile(ctx context.Context, path string, content []byte)
 func (f *FileSystem) MkdirAll(ctx context.Context, path string) error {
 	return os.MkdirAll(path, 0755)
 }
+
+// ReadDir returns the base names of entries directly under path. Missing
+// directories surface os.ErrNotExist so callers can treat them as "no
+// entries" without distinguishing optional from missing.
+func (f *FileSystem) ReadDir(ctx context.Context, path string) ([]string, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	return names, nil
+}

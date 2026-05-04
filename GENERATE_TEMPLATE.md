@@ -114,6 +114,37 @@ func New{{ .Entity }}() (*{{ .Entity }}, error) {
 - Do NOT template things that stay constant across uses (standard library imports, framework boilerplate)
 - `.go` files are automatically formatted with `goimports` after generation — don't worry about import ordering
 
+### Sharing snippets across files: `_partials/`
+
+Place files under `<template>/_partials/*.tmpl` to define reusable snippets
+that any other file in the template can invoke via `{{ template "name" . }}`.
+This is the standard Go `text/template` named-template mechanism, scoped to
+one scaffor template.
+
+- Each partial file uses `{{ define "name" }}…{{ end }}` blocks. A single
+  file may contain multiple `define`s.
+- Partials are parsed once per `execute` and visible to every content file
+  in that run.
+- The `_partials/` directory itself is never rendered as output — the leading
+  underscore marks it.
+- Variables declared on a command must cover variables used in **the
+  content file's own AST and the pipeline arguments passed to a partial**.
+  Variables referenced only inside a partial body are not checked against
+  the calling command's `variables` list (a partial may be invoked from
+  several commands with different declared sets).
+- Bad partial syntax surfaces as a `_partials:<file>` lint error and as a
+  hard failure on `execute`.
+
+Example — a tenant-scoped SQL `WHERE` clause shared by every repository:
+
+```
+mytemplate/
+  _partials/
+    sql.tmpl              # {{ define "tenantWhere" }} AND tenant_id = $2 {{ end }}
+  repository_entity.go.tmpl    # uses {{ template "tenantWhere" . }}
+  manifest.yaml
+```
+
 ## Step 4: Write the manifest.yaml
 
 ### Full Schema

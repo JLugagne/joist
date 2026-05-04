@@ -82,6 +82,90 @@ func getFuncMap() template.FuncMap {
 	return sprig.TxtFuncMap()
 }
 
+// loadPartials reads every `*.tmpl` file under `<templateDir>/_partials/` and
+// parses them into a single `*template.Template` set so that file content
+// templates can reference shared snippets via `{{ template "name" . }}`.
+//
+// Returns a fresh empty template (no defines) when the partials directory is
+// missing — the directory is optional. When the directory exists but a
+// partial fails to parse, the error is surfaced so callers can report it
+// without falling back to silent partial loss.
+//
+// Callers MUST clone the returned template before parsing per-file content
+// (see `tmpl.Clone()`); otherwise concurrent renders would race on the
+// shared parse tree.
+func (h *ScaffolderHandler) loadPartials(ctx context.Context, templateDir, templateName string) (*template.Template, error) {
+	root := template.New("_partials_root").Funcs(getFuncMap())
+	dir := filepath.Join(templateDir, templateName, "_partials")
+	entries, err := h.fs.ReadDir(ctx, dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return root, nil
+		}
+		return nil, fmt.Errorf("failed to read partials dir %s: %w", dir, err)
+	}
+	for _, name := range entries {
+		if !strings.HasSuffix(name, ".tmpl") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		data, err := h.fs.ReadFile(ctx, path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read partial %s: %w", path, err)
+		}
+		if _, err := root.Parse(string(data)); err != nil {
+			return nil, fmt.Errorf("failed to parse partial %s: %w", path, err)
+		}
+	}
+	return root, nil
+}
+
+// parseWithPartials clones the partials root and parses content into the
+// clone under the given template name. Use this instead of
+// `template.New(name).Parse(content)` whenever the content may invoke a
+// partial via `{{ template "x" . }}`.
+func parseWithPartials(partials *template.Template, name, content string) (*template.Template, error) {
+	clone, err := partials.Clone()
+	if err != nil {
+		return nil, err
+	}
+	t := clone.New(name)
+	return t.Parse(content)
+}
+
+// lintPartials is the lint-side counterpart of loadPartials: it loads partials
+// and converts every error (missing dir handled silently, parse failures, etc.)
+// into LintError entries instead of failing fast. Returns the partials set
+// (which may be empty if loading failed) so subsequent file lints can still
+// resolve {{ template "x" . }} calls referencing partials that did parse.
+func (h *ScaffolderHandler) lintPartials(ctx context.Context, templateDir, templateName string) (*template.Template, []domain.LintError) {
+	root := template.New("_partials_root").Funcs(getFuncMap())
+	dir := filepath.Join(templateDir, templateName, "_partials")
+	entries, err := h.fs.ReadDir(ctx, dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return root, nil
+		}
+		return root, []domain.LintError{{Field: "_partials", Message: fmt.Sprintf("failed to read partials dir: %v", err)}}
+	}
+	var errs []domain.LintError
+	for _, name := range entries {
+		if !strings.HasSuffix(name, ".tmpl") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		data, err := h.fs.ReadFile(ctx, path)
+		if err != nil {
+			errs = append(errs, domain.LintError{Field: "_partials", Message: fmt.Sprintf("cannot read partial %s: %v", name, err)})
+			continue
+		}
+		if _, err := root.Parse(string(data)); err != nil {
+			errs = append(errs, domain.LintError{Field: "_partials:" + name, Message: fmt.Sprintf("invalid template syntax: %v", err)})
+		}
+	}
+	return root, errs
+}
+
 // Execute performs the scaffolding with dedup and hint aggregation.
 // After files are written, post_commands are resolved and either printed
 // (for the LLM/user to run manually) or executed directly (default, unless opts.DryRun is true).
@@ -106,6 +190,13 @@ func (h *ScaffolderHandler) Execute(ctx context.Context, templateName, commandNa
 		if err := h.preFlightCheck(ctx, tmpl.Name, commandName, cmdMap, params); err != nil {
 			return nil, err
 		}
+	}
+
+	// Partials are parsed once per Execute and cloned per file render.
+	// Cloning is required because each Parse mutates the shared parse tree.
+	partials, err := h.loadPartials(ctx, tmpl.Source, tmpl.Name)
+	if err != nil {
+		return nil, err
 	}
 
 	// Execution
@@ -149,6 +240,9 @@ func (h *ScaffolderHandler) Execute(ctx context.Context, templateName, commandNa
 				return err
 			}
 			targetPath := pathBuf.String()
+			if opts.Dir != "" && !filepath.IsAbs(targetPath) {
+				targetPath = filepath.Join(opts.Dir, targetPath)
+			}
 
 			if err := safeDestination(targetPath); err != nil {
 				return err
@@ -194,7 +288,7 @@ func (h *ScaffolderHandler) Execute(ctx context.Context, templateName, commandNa
 				if err != nil {
 					return fmt.Errorf("failed to read template %s: %w", tmplPath, err)
 				}
-				contentTmpl, err := template.New("content").Funcs(funcMap).Parse(string(tmplData))
+				contentTmpl, err := parseWithPartials(partials, "content", string(tmplData))
 				if err != nil {
 					return err
 				}
@@ -354,6 +448,9 @@ func (h *ScaffolderHandler) Execute(ctx context.Context, templateName, commandNa
 		for _, rc := range toRun {
 			fmt.Printf("Execute command: %s\n", rc.rendered)
 			cmd := exec.CommandContext(ctx, "sh", "-c", rc.rendered)
+			if opts.Dir != "" {
+				cmd.Dir = opts.Dir
+			}
 			var out bytes.Buffer
 			cmd.Stdout = &out
 			cmd.Stderr = &out
@@ -456,6 +553,13 @@ func (h *ScaffolderHandler) Lint(ctx context.Context, templateName string, templ
 	}
 
 	var errs []domain.LintError
+
+	// Partials are loaded once for the whole lint pass so that subsequent
+	// per-file syntax checks can resolve `{{ template "name" . }}` calls.
+	// A failure to read or parse a partial is itself a lint error — surface
+	// it with field "_partials" and continue with whatever did parse.
+	partials, partialsErrs := h.lintPartials(ctx, templateDir, tmpl.Name)
+	errs = append(errs, partialsErrs...)
 
 	for _, cmd := range tmpl.Commands {
 		// Build declared variable set for this command
@@ -563,8 +667,9 @@ func (h *ScaffolderHandler) Lint(ctx context.Context, templateName string, templ
 				continue
 			}
 
-			// Validate that the template file parses correctly
-			if _, err := template.New("").Funcs(getFuncMap()).Parse(string(data)); err != nil {
+			// Validate that the template file parses correctly. Use the
+			// partials set so {{ template "name" . }} calls resolve.
+			if _, err := parseWithPartials(partials, "", string(data)); err != nil {
 				errs = append(errs, domain.LintError{
 					Command: cmd.Command,
 					Field:   "files.source",
@@ -758,6 +863,12 @@ func inspectNode(node parse.Node, vars map[string]bool) {
 		if n.ElseList != nil {
 			inspectNode(n.ElseList, vars)
 		}
+		if n.Pipe != nil {
+			inspectNode(n.Pipe, vars)
+		}
+	case *parse.TemplateNode:
+		// {{ template "name" pipeline }} — walk the pipeline so any
+		// .Var passed into the partial is counted as used.
 		if n.Pipe != nil {
 			inspectNode(n.Pipe, vars)
 		}

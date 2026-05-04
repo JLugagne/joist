@@ -28,6 +28,7 @@ type filesystemShim = interface {
 	ReadFile(ctx context.Context, path string) ([]byte, error)
 	WriteFile(ctx context.Context, path string, content []byte) error
 	MkdirAll(ctx context.Context, path string) error
+	ReadDir(ctx context.Context, path string) ([]string, error)
 }
 
 // discoverTemplateNames inspects a mock FS and returns the set of template
@@ -173,6 +174,97 @@ func TestScaffolder_Execute(t *testing.T) {
 	})
 }
 
+// TestScaffolder_Partials covers the _partials/ feature: templates can
+// share snippets via {{ define }} files in <template>/_partials/, and
+// content templates invoke them with {{ template "name" . }}.
+func TestScaffolder_Partials(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Execute renders partials referenced from content", func(t *testing.T) {
+		fs := &mockFS{files: map[string][]byte{
+			".scaffor-templates/withparts/manifest.yaml": []byte(`name: withparts
+commands:
+  - command: gen
+    variables:
+      - key: Name
+        description: name
+    files:
+      - source: file.go.tmpl
+        destination: out/{{ .Name }}.go
+`),
+			".scaffor-templates/withparts/_partials/header.tmpl": []byte(`{{ define "pkgHeader" }}// generated for {{ .Name }}{{ end }}`),
+			".scaffor-templates/withparts/file.go.tmpl":          []byte("{{ template \"pkgHeader\" . }}\npackage {{ .Name }}"),
+		}}
+		handler := newHandler(fs)
+		_, err := handler.Execute(ctx, "withparts", "gen", map[string]string{"Name": "alpha"}, domain.ExecuteOptions{})
+		require.NoError(t, err)
+		got := string(fs.files["out/alpha.go"])
+		assert.Contains(t, got, "// generated for alpha")
+		assert.Contains(t, got, "package alpha")
+	})
+
+	t.Run("Execute fails clearly when partial has bad syntax", func(t *testing.T) {
+		fs := &mockFS{files: map[string][]byte{
+			".scaffor-templates/badparts/manifest.yaml": []byte(`name: badparts
+commands:
+  - command: gen
+    variables: []
+    files:
+      - source: file.go.tmpl
+        destination: out/file.go
+`),
+			".scaffor-templates/badparts/_partials/broken.tmpl": []byte(`{{ define "x" }}{{ .Foo`), // unclosed action
+			".scaffor-templates/badparts/file.go.tmpl":         []byte(`package main`),
+		}}
+		handler := newHandler(fs)
+		_, err := handler.Execute(ctx, "badparts", "gen", map[string]string{}, domain.ExecuteOptions{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "partial")
+	})
+
+	t.Run("Lint reports broken partial", func(t *testing.T) {
+		fs := &mockFS{files: map[string][]byte{
+			".scaffor-templates/lintparts/manifest.yaml": []byte(`name: lintparts
+commands:
+  - command: gen
+    variables: []
+    files: []
+`),
+			".scaffor-templates/lintparts/_partials/bad.tmpl": []byte(`{{ define "x" }}{{ .Foo`),
+		}}
+		handler := newHandler(fs)
+		errs := handler.Lint(ctx, "lintparts", ".scaffor-templates")
+		var found bool
+		for _, e := range errs {
+			if strings.HasPrefix(e.Field, "_partials") {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "broken partial should produce a _partials lint error, got: %v", errs)
+	})
+
+	t.Run("Lint accepts content using a partial", func(t *testing.T) {
+		fs := &mockFS{files: map[string][]byte{
+			".scaffor-templates/lintok/manifest.yaml": []byte(`name: lintok
+commands:
+  - command: gen
+    variables:
+      - key: Name
+        description: name
+    files:
+      - source: file.go.tmpl
+        destination: out/{{ .Name }}.go
+`),
+			".scaffor-templates/lintok/_partials/h.tmpl": []byte(`{{ define "h" }}// {{ .Name }}{{ end }}`),
+			".scaffor-templates/lintok/file.go.tmpl":     []byte("{{ template \"h\" . }}\npackage {{ .Name }}"),
+		}}
+		handler := newHandler(fs)
+		errs := handler.Lint(ctx, "lintok", ".scaffor-templates")
+		assert.Empty(t, errs, "valid template with partial should lint cleanly, got: %v", errs)
+	})
+}
+
 type mockFS struct {
 	files map[string][]byte
 }
@@ -190,6 +282,35 @@ func (m *mockFS) WriteFile(ctx context.Context, path string, content []byte) err
 }
 
 func (m *mockFS) MkdirAll(ctx context.Context, path string) error { return nil }
+
+// ReadDir scans the in-memory file map for entries directly under path. The
+// mock is path-based with no directory entities, so an empty result is
+// returned as os.ErrNotExist to match the real filesystem's behavior for a
+// missing _partials directory.
+func (m *mockFS) ReadDir(ctx context.Context, path string) ([]string, error) {
+	prefix := strings.TrimRight(path, "/") + "/"
+	seen := map[string]struct{}{}
+	for p := range m.files {
+		if !strings.HasPrefix(p, prefix) {
+			continue
+		}
+		rest := p[len(prefix):]
+		if i := strings.Index(rest, "/"); i >= 0 {
+			rest = rest[:i]
+		}
+		if rest != "" {
+			seen[rest] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil, os.ErrNotExist
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	return out, nil
+}
 
 func (m *mockFS) ExecuteGoImports(ctx context.Context, files []string) error { return nil }
 
@@ -923,6 +1044,31 @@ func (m *mockFSWithReadError) WriteFile(_ context.Context, path string, content 
 }
 
 func (m *mockFSWithReadError) MkdirAll(_ context.Context, _ string) error { return nil }
+
+func (m *mockFSWithReadError) ReadDir(_ context.Context, path string) ([]string, error) {
+	prefix := strings.TrimRight(path, "/") + "/"
+	seen := map[string]struct{}{}
+	for p := range m.files {
+		if !strings.HasPrefix(p, prefix) {
+			continue
+		}
+		rest := p[len(prefix):]
+		if i := strings.Index(rest, "/"); i >= 0 {
+			rest = rest[:i]
+		}
+		if rest != "" {
+			seen[rest] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil, os.ErrNotExist
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	return out, nil
+}
 
 func (m *mockFSWithReadError) ExecuteGoImports(_ context.Context, _ []string) error { return nil }
 
