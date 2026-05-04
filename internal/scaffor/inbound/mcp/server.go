@@ -313,6 +313,7 @@ optional per-command hints, and shell commands.`,
 			DryRun: args.DryRun,
 			Skip:   args.Skip,
 			Force:  args.Force,
+			Dir:    args.Dir,
 		}
 		var fileEvents []domain.FileEvent
 		// Execute writes its output to os.Stdout. Capture it so that it can be
@@ -376,6 +377,7 @@ The output reports each step's file events, hints, and shell command results in 
 		opts := domain.ExecuteOptions{
 			Skip:  args.Skip,
 			Force: args.Force,
+			Dir:   args.Dir,
 		}
 
 		var sb strings.Builder

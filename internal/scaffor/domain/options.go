@@ -9,6 +9,8 @@ type ExecuteOptions struct {
 	Skip bool
 	// Force overwrites files that already exist instead of failing.
 	Force bool
+	// Dir sets the working directory for file output and shell commands. Empty means process cwd.
+	Dir string
 }
 
 // FileEvent records what happened to a single file during execution.
