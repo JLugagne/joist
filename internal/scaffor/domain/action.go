@@ -27,8 +27,22 @@ type TemplateCommand struct {
 }
 
 type TemplateVariable struct {
-	Key         string `yaml:"key"`
+	// Key is the variable name (must start with a capital letter — text/template requirement).
+	Key string `yaml:"key"`
+	// Description is the human-readable explanation surfaced by `scaffor doc` and the
+	// "missing required variables" error.
 	Description string `yaml:"description"`
+	// Optional marks the variable as not required at execute time. When omitted and
+	// Default is empty, the variable's template references render as the empty string
+	// (text/template's missing-key default). `scaffor doc` tags optional variables
+	// with "(optional)" in the listing.
+	Optional bool `yaml:"optional,omitempty"`
+	// Default is the value injected into params when the user does not pass --set
+	// for this variable. Implies Optional (a defaulted variable is never "missing").
+	// Use for stable cross-cutting defaults like "pg" for an Adapter; for derived
+	// defaults that need other variables (e.g. printf "internal/%s/...") use sprig's
+	// `default` inside the template instead.
+	Default string `yaml:"default,omitempty"`
 }
 
 type TemplateFile struct {

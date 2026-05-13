@@ -181,8 +181,36 @@ func (h *ScaffolderHandler) Execute(ctx context.Context, templateName, commandNa
 		cmdMap[c.Command] = c
 	}
 
-	if _, ok := cmdMap[commandName]; !ok {
+	cmd, ok := cmdMap[commandName]
+	if !ok {
 		return nil, fmt.Errorf("command '%s' not found in template '%s'", commandName, templateName)
+	}
+
+	// Resolve variables: required vars must be present; missing vars with a Default
+	// get filled in here; missing Optional vars are simply absent (templates render
+	// them as "" via text/template's missing-key default).
+	// This is the single enforcement point so every front-end (CLI / MCP / library
+	// callers) sees consistent behaviour. The CLI also pre-checks and prints a
+	// friendlier per-variable error before reaching this code path.
+	if params == nil {
+		params = map[string]string{}
+	}
+	var missing []string
+	for _, v := range cmd.Variables {
+		if _, ok := params[v.Key]; ok {
+			continue
+		}
+		if v.Default != "" {
+			params[v.Key] = v.Default
+			continue
+		}
+		if v.Optional {
+			continue
+		}
+		missing = append(missing, v.Key)
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("missing required variables for %s/%s: %v", templateName, commandName, missing)
 	}
 
 	// Pre-flight check (only when neither skip nor force is set)

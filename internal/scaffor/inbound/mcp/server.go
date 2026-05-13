@@ -171,7 +171,14 @@ func writeCommandDetail(sb *strings.Builder, cmd domain.TemplateCommand) {
 	if len(cmd.Variables) > 0 {
 		sb.WriteString("  Variables:\n")
 		for _, v := range cmd.Variables {
-			fmt.Fprintf(sb, "    %s\t%s\n", v.Key, v.Description)
+			tag := ""
+			switch {
+			case v.Default != "":
+				tag = fmt.Sprintf(" (optional, default: %q)", v.Default)
+			case v.Optional:
+				tag = " (optional)"
+			}
+			fmt.Fprintf(sb, "    %s%s\t%s\n", v.Key, tag, v.Description)
 		}
 	} else {
 		sb.WriteString("  Variables: None\n")

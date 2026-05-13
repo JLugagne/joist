@@ -70,7 +70,14 @@ func printCommandDetail(cmd domain.TemplateCommand) {
 	if len(cmd.Variables) > 0 {
 		fmt.Println("  Variables:")
 		for _, v := range cmd.Variables {
-			fmt.Printf("    --set %s\t%s\n", v.Key, v.Description)
+			tag := ""
+			switch {
+			case v.Default != "":
+				tag = fmt.Sprintf(" (optional, default: %q)", v.Default)
+			case v.Optional:
+				tag = " (optional)"
+			}
+			fmt.Printf("    --set %s%s\t%s\n", v.Key, tag, v.Description)
 		}
 	} else {
 		fmt.Println("  Variables: None")
@@ -259,11 +266,23 @@ automatically. Pass --dry-run to print them without executing.`,
 				}
 			}
 
+			// Resolve variables. Required vars must be present in params; optional vars
+			// (Optional: true OR Default != "") may be absent — fill missing-with-default
+			// from Default, and accept absent-without-default as "" (text/template's
+			// missing-key default still produces "" for any direct reference).
 			var missing []domain.TemplateVariable
 			for _, v := range targetCmd.Variables {
-				if _, ok := params[v.Key]; !ok {
-					missing = append(missing, v)
+				if _, ok := params[v.Key]; ok {
+					continue
 				}
+				if v.Default != "" {
+					params[v.Key] = v.Default
+					continue
+				}
+				if v.Optional {
+					continue
+				}
+				missing = append(missing, v)
 			}
 
 			if len(missing) > 0 {
@@ -273,6 +292,9 @@ automatically. Pass --dry-run to print them without executing.`,
 				}
 				fmt.Printf("\nUsage: scaffor execute %s %s", templateName, commandName)
 				for _, v := range targetCmd.Variables {
+					if v.Optional || v.Default != "" {
+						continue
+					}
 					fmt.Printf(" --set %s=\"value\"", v.Key)
 				}
 				fmt.Println()
