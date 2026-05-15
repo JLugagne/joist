@@ -17,10 +17,10 @@ import (
 
 // ToolCall is a single logged entry written to the session JSONL file.
 type ToolCall struct {
-	Timestamp  time.Time         `json:"timestamp"`
-	Tool       string            `json:"tool"`
-	Parameters map[string]any    `json:"parameters,omitempty"`
-	FileEvents []FileEvent       `json:"file_events,omitempty"`
+	Timestamp  time.Time      `json:"timestamp"`
+	Tool       string         `json:"tool"`
+	Parameters map[string]any `json:"parameters,omitempty"`
+	FileEvents []FileEvent    `json:"file_events,omitempty"`
 }
 
 // FileEvent records what happened to a single file during execution.
@@ -35,15 +35,10 @@ type Session struct {
 	mu   sync.Mutex
 }
 
-// NewSession creates the .scaffor/ directory (if needed) and returns a Session
-// whose log file is .scaffor/<uuid>.jsonl.
+// NewSession returns a Session whose log file will be created under .scaffor/ on the first call to Log. The directory is not created until then.
 func NewSession() (*Session, error) {
-	dir := ".scaffor"
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("creating session directory: %w", err)
-	}
 	id := uuid.New().String()
-	return &Session{path: filepath.Join(dir, id+".jsonl")}, nil
+	return &Session{path: filepath.Join(".scaffor", id+".jsonl")}, nil
 }
 
 // Log appends a tool call entry to the JSONL file.
@@ -62,6 +57,10 @@ func (s *Session) Log(tool string, params map[string]any, events []FileEvent) er
 		return err
 	}
 	data = append(data, '\n')
+
+	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
+		return fmt.Errorf("creating session directory: %w", err)
+	}
 
 	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
